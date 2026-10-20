@@ -120,6 +120,38 @@ describe('SecurityHeadersMiddleware', () => {
     expect(csp).toContain("'unsafe-eval'");
   });
 
+  it('sets X-Frame-Options, nosniff, HSTS, and CSP', async () => {
+    const mw = await buildMiddleware({ NODE_ENV: 'production' });
+    const headers = new Map<string, string>();
+    const req = { path: '/api/auth/login' } as Request;
+    const res = {
+      setHeader: jest.fn((name: string, value: string) => {
+        headers.set(name.toLowerCase(), value);
+      }),
+      getHeader: jest.fn((name: string) => headers.get(name.toLowerCase())),
+      removeHeader: jest.fn(),
+    } as unknown as Response;
+
+    await new Promise<void>((resolve) => {
+      mw.use(req, res, (() => resolve()) as NextFunction);
+    });
+
+    expect(headers.get('x-frame-options')).toBe('DENY');
+    expect(headers.get('x-content-type-options')).toBe('nosniff');
+    expect(headers.get('strict-transport-security')).toContain(
+      'max-age=31536000',
+    );
+    expect(headers.get('strict-transport-security')).toContain(
+      'includeSubDomains',
+    );
+    expect(headers.get('content-security-policy')).toContain(
+      "default-src 'self'",
+    );
+    expect(headers.get('content-security-policy')).not.toContain(
+      'unsafe-inline',
+    );
+  });
+
   it('omits CSP entirely when SECURITY_CSP_ENABLED=false', async () => {
     const mw = await buildMiddleware({ SECURITY_CSP_ENABLED: 'false' });
     const req = { path: '/api/payments' } as Request;
