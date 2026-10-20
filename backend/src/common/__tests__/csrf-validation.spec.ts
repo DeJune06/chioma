@@ -1,4 +1,7 @@
-import { CsrfMiddleware } from '../middleware/csrf.middleware';
+import {
+  CsrfMiddleware,
+  issueDoubleSubmitCsrfToken,
+} from '../middleware/csrf.middleware';
 import type { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
@@ -407,6 +410,56 @@ describe('CSRF Protection Validation Tests', () => {
         middleware.use(req, res, next);
         expect(next).toHaveBeenCalledTimes(1);
       });
+    });
+
+    it('reads the double-submit cookie from the Cookie header', () => {
+      const token = createValidToken('test-secret-key');
+      const next = jest.fn();
+      const req = {
+        method: 'POST',
+        path: '/api/protected',
+        headers: {
+          'x-csrf-token': token,
+          cookie: `XSRF-TOKEN=${token}`,
+        },
+      } as any;
+
+      middleware.use(req, {} as any, next);
+      expect(next).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a valid cookie instead of rotating it on GET', () => {
+      const token = createValidToken('test-secret-key');
+      const next = jest.fn();
+      const res = { cookie: jest.fn(), setHeader: jest.fn() } as any;
+      const req = {
+        method: 'GET',
+        path: '/api/public',
+        headers: {},
+        cookies: { 'XSRF-TOKEN': token },
+      } as any;
+
+      middleware.use(req, res, next);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.cookie).not.toHaveBeenCalled();
+      expect(res.setHeader).toHaveBeenCalledWith('X-CSRF-Token', token);
+    });
+
+    it('issues a cookie and header from issueDoubleSubmitCsrfToken', () => {
+      const res = { cookie: jest.fn(), setHeader: jest.fn() } as any;
+      const token = issueDoubleSubmitCsrfToken(
+        mockConfigService as ConfigService,
+        res,
+      );
+
+      expect(token.split(':')).toHaveLength(3);
+      expect(res.cookie).toHaveBeenCalledWith(
+        'XSRF-TOKEN',
+        token,
+        expect.objectContaining({ httpOnly: false, sameSite: 'strict' }),
+      );
+      expect(res.setHeader).toHaveBeenCalledWith('X-CSRF-Token', token);
     });
 
     const unsafeMethods = ['POST', 'PUT', 'DELETE', 'PATCH'];
