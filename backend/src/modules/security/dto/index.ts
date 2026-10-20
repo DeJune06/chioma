@@ -4,3 +4,4 @@ export * from './query-threats.dto';
 export * from './query-compliance-report.dto';
 export * from './resolve-incident.dto';
 export * from './anchor-audit-logs.dto';
+export * from './delegate-permission.dto';

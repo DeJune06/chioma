@@ -6,10 +6,12 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RbacService } from '../rbac.service';
+import { PermissionDelegationService } from '../permission-delegation.service';
 import {
   PermissionAction,
   PermissionResource,
 } from '../entities/permission.entity';
+import { UserRole } from '../../users/entities/user.entity';
 
 export const PERMISSIONS_KEY = 'required_permissions';
 
@@ -28,9 +30,10 @@ export class PermissionsGuard implements CanActivate {
   constructor(
     private reflector: Reflector,
     private rbacService: RbacService,
+    private delegationService: PermissionDelegationService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const required = this.reflector.getAllAndOverride<RequiredPermission[]>(
       PERMISSIONS_KEY,
       [context.getHandler(), context.getClass()],
@@ -40,20 +43,27 @@ export class PermissionsGuard implements CanActivate {
       return true;
     }
 
-    const { user } = context
-      .switchToHttp()
-      .getRequest<{ user?: { role?: string } }>();
+    const { user } = context.switchToHttp().getRequest<{
+      user?: { id?: string; role?: UserRole };
+    }>();
 
     if (!user?.role) {
       throw new ForbiddenException('User not authenticated');
     }
 
-    const allGranted = required.every(({ resource, action }) =>
-      this.rbacService.hasPermission(user.role!, resource, action),
-    );
+    for (const { resource, action } of required) {
+      if (this.rbacService.hasPermission(user.role, resource, action)) {
+        continue;
+      }
 
-    if (!allGranted) {
-      throw new ForbiddenException('Insufficient permissions');
+      const delegated =
+        !!user.id &&
+        (user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN) &&
+        (await this.delegationService.granteeHas(user.id, resource, action));
+
+      if (!delegated) {
+        throw new ForbiddenException('Insufficient permissions');
+      }
     }
 
     return true;
