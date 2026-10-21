@@ -16,6 +16,7 @@ import { WebVitalsReporter } from '@/components/web-vitals/WebVitalsReporter';
 import { OrientationHandler } from '@/components/orientation/OrientationHandler';
 import { HtmlAttributesSync } from '@/components/i18n/HtmlAttributesSync';
 import NetworkIndicator from '@/components/shared/NetworkIndicator';
+import ThemeManager from '@/components/ThemeManager';
 
 // Components above are imported from their own modules rather than through
 // barrel files (`@/components/modals`, `@/components/offline`, ...) so the
@@ -62,6 +63,7 @@ export function RootLayoutClient({
         <ModalProvider>
           <ErrorProvider>
             <StoreHydrator />
+            <ThemeManager />
             <HtmlAttributesSync />
             <ErrorMonitoringProvider />
             <WebVitalsReporter />
