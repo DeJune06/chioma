@@ -9,34 +9,54 @@ import { Request, Response, NextFunction } from 'express';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
-interface RequestWithCookies extends Request {
-  cookies: Record<string, string> | undefined;
+type RequestWithCookies = Request & {
+  cookies?: Record<string, string>;
+};
+
+const CSRF_COOKIE_NAME = 'XSRF-TOKEN';
+const CSRF_HEADER_NAMES = ['x-xsrf-token', 'x-csrf-token'] as const;
+const CSRF_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const CSRF_CLOCK_SKEW_MS = 60 * 1000;
+
+/**
+ * Issue a double-submit CSRF token: non-HttpOnly cookie plus response header.
+ * Safe methods and GET /auth/csrf-token call this. Mutations must echo it.
+ */
+export function issueDoubleSubmitCsrfToken(
+  configService: ConfigService,
+  res: Response,
+): string {
+  const token = createCsrfToken(readCsrfSecret(configService));
+  const isProduction = configService.get<string>('NODE_ENV') === 'production';
+  const cookieOptions = {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite: 'strict' as const,
+    maxAge: CSRF_MAX_AGE_MS,
+    path: '/',
+  };
+
+  assertCookieSettings(cookieOptions, isProduction);
+  res.cookie(CSRF_COOKIE_NAME, token, cookieOptions);
+  res.setHeader('X-CSRF-Token', token);
+  return token;
 }
 
 /**
- * CSRF Protection Middleware using Double-Submit Cookie Pattern
- * Generates and validates CSRF tokens for state-changing operations
+ * CSRF protection using the double-submit cookie pattern.
+ * Safe methods issue a token. Mutations must send the same token in
+ * X-XSRF-TOKEN, X-CSRF-Token, or a `_csrf` body field.
  */
 @Injectable()
 export class CsrfMiddleware implements NestMiddleware {
   private readonly logger = new Logger(CsrfMiddleware.name);
   private readonly enabled: boolean;
-  private readonly cookieName = 'XSRF-TOKEN';
-  private readonly headerName = 'X-XSRF-TOKEN';
   private readonly secret: string;
 
   constructor(private configService: ConfigService) {
     this.enabled =
       this.configService.get<string>('SECURITY_CSRF_ENABLED') !== 'false';
-    const secret =
-      this.configService.get<string>('SECURITY_SESSION_SECRET') ||
-      this.configService.get<string>('JWT_SECRET');
-    if (this.enabled && !secret) {
-      throw new Error(
-        'SECURITY_SESSION_SECRET (or JWT_SECRET) is required when CSRF is enabled',
-      );
-    }
-    this.secret = secret ?? '';
+    this.secret = this.enabled ? readCsrfSecret(this.configService) : '';
   }
 
   use(req: RequestWithCookies, res: Response, next: NextFunction) {
@@ -44,17 +64,13 @@ export class CsrfMiddleware implements NestMiddleware {
       return next();
     }
 
-    // Skip CSRF for safe methods
     const method = req.method;
     if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      // Generate token for GET requests (for forms)
-      this.generateToken(req, res);
+      this.ensureToken(req, res);
       return next();
     }
 
-    // Skip CSRF for health checks, public endpoints, and webhook routes
-    // (webhooks authenticate via HMAC signature, not browser cookies)
-    const path = req.path;
+    const path = req.path || '';
     if (
       path.startsWith('/health') ||
       path.startsWith('/api/docs') ||
@@ -65,19 +81,17 @@ export class CsrfMiddleware implements NestMiddleware {
       return next();
     }
 
-    // Validate CSRF token for state-changing methods
-    const headerKey = this.headerName.toLowerCase();
-    const tokenFromHeader = req.headers[headerKey] as string | undefined;
-    const tokenFromCookie = req.cookies?.[this.cookieName];
+    const cookieToken = readCookie(req, CSRF_COOKIE_NAME);
+    const submitted = readSubmittedToken(req);
 
-    if (!tokenFromHeader || !tokenFromCookie) {
+    if (!submitted || !cookieToken) {
       this.logger.warn(
-        `CSRF token missing: header=${!!tokenFromHeader}, cookie=${!!tokenFromCookie}, path=${path}`,
+        `CSRF token missing: headerOrBody=${!!submitted}, cookie=${!!cookieToken}, path=${path}`,
       );
       throw new UnauthorizedException('CSRF token missing or invalid');
     }
 
-    if (!this.validateToken(tokenFromHeader, tokenFromCookie)) {
+    if (!tokensMatch(submitted, cookieToken, this.secret)) {
       this.logger.warn(`CSRF token mismatch for path: ${path}`);
       throw new UnauthorizedException('CSRF token mismatch');
     }
@@ -85,132 +99,160 @@ export class CsrfMiddleware implements NestMiddleware {
     next();
   }
 
-  /**
-   * Generate CSRF token and set it as a cookie
-   */
-  private generateToken(req: RequestWithCookies, res: Response): void {
-    const token = this.createToken();
-    const isProduction =
-      this.configService.get<string>('NODE_ENV') === 'production';
+  private ensureToken(req: RequestWithCookies, res: Response): void {
+    const existing = readCookie(req, CSRF_COOKIE_NAME);
+    if (existing && isCsrfTokenValid(existing, this.secret)) {
+      res.setHeader('X-CSRF-Token', existing);
+      return;
+    }
+    issueDoubleSubmitCsrfToken(this.configService, res);
+  }
+}
 
-    // Cookie settings for CSRF protection
-    const cookieOptions = {
-      httpOnly: false, // IMPORTANT: Must be false for double-submit cookie pattern - client needs to read this
-      secure: isProduction, // Only send over HTTPS in production to prevent man-in-the-middle attacks
-      sameSite: 'strict' as const, // Strict same-site policy to prevent CSRF attacks
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-      path: '/',
-    };
-
-    // Verify cookie settings are correctly configured
-    this.verifyCookieSettings(cookieOptions, isProduction);
-
-    // Set cookie with verified secure flags
-    res.cookie(this.cookieName, token, cookieOptions);
-
-    // Also set in response header for convenience
-    res.setHeader('X-CSRF-Token', token);
-
-    this.logger.debug(
-      `CSRF token generated with settings: secure=${cookieOptions.secure}, httpOnly=${cookieOptions.httpOnly}, sameSite=${cookieOptions.sameSite}`,
+function readCsrfSecret(configService: ConfigService): string {
+  const secret =
+    configService.get<string>('SECURITY_SESSION_SECRET') ||
+    configService.get<string>('JWT_SECRET');
+  if (!secret) {
+    throw new Error(
+      'SECURITY_SESSION_SECRET (or JWT_SECRET) is required when CSRF is enabled',
     );
   }
+  return secret;
+}
 
-  /**
-   * Verify that cookie settings are properly configured for security
-   * @throws Error if cookie settings are insecure
-   */
-  private verifyCookieSettings(
-    cookieOptions: {
-      httpOnly: boolean;
-      secure: boolean;
-      sameSite: 'strict' | 'lax' | 'none';
-    },
-    isProduction: boolean,
-  ): void {
-    // Verify httpOnly is false (required for double-submit pattern)
-    if (cookieOptions.httpOnly !== false) {
-      this.logger.error(
-        'CSRF cookie httpOnly must be false for double-submit pattern',
-      );
-      throw new InternalServerErrorException(
-        'Invalid CSRF cookie configuration: httpOnly must be false',
-      );
-    }
-
-    // Verify secure flag matches environment
-    if (isProduction && !cookieOptions.secure) {
-      this.logger.error(
-        'CSRF cookie must have secure flag in production environment',
-      );
-      throw new InternalServerErrorException(
-        'Invalid CSRF cookie configuration: secure must be true in production',
-      );
-    }
-
-    // Verify sameSite is set to strict or lax
-    if (!['strict', 'lax'].includes(cookieOptions.sameSite)) {
-      this.logger.error(
-        `CSRF cookie sameSite must be 'strict' or 'lax', got: ${cookieOptions.sameSite}`,
-      );
-      throw new InternalServerErrorException(
-        'Invalid CSRF cookie configuration: sameSite must be strict or lax',
-      );
-    }
-
-    this.logger.log(
-      `CSRF cookie settings verified: environment=${isProduction ? 'production' : 'development'}, secure=${cookieOptions.secure}, httpOnly=${cookieOptions.httpOnly}, sameSite=${cookieOptions.sameSite}`,
+function assertCookieSettings(
+  cookieOptions: {
+    httpOnly: boolean;
+    secure: boolean;
+    sameSite: 'strict' | 'lax' | 'none';
+  },
+  isProduction: boolean,
+): void {
+  if (cookieOptions.httpOnly !== false) {
+    throw new InternalServerErrorException(
+      'Invalid CSRF cookie configuration: httpOnly must be false',
     );
   }
+  if (isProduction && !cookieOptions.secure) {
+    throw new InternalServerErrorException(
+      'Invalid CSRF cookie configuration: secure must be true in production',
+    );
+  }
+  if (!['strict', 'lax'].includes(cookieOptions.sameSite)) {
+    throw new InternalServerErrorException(
+      'Invalid CSRF cookie configuration: sameSite must be strict or lax',
+    );
+  }
+}
 
-  /**
-   * Create a new CSRF token
-   */
-  private createToken(): string {
-    const randomBytes = crypto.randomBytes(32).toString('hex');
-    const timestamp = Date.now().toString();
-    const data = `${randomBytes}:${timestamp}`;
-    const hmac = crypto
-      .createHmac('sha256', this.secret)
-      .update(data)
-      .digest('hex');
-    return `${data}:${hmac}`;
+function createCsrfToken(secret: string): string {
+  const randomBytes = crypto.randomBytes(32).toString('hex');
+  const timestamp = Date.now().toString();
+  const data = `${randomBytes}:${timestamp}`;
+  const hmac = crypto.createHmac('sha256', secret).update(data).digest('hex');
+  return `${data}:${hmac}`;
+}
+
+function readSubmittedToken(req: RequestWithCookies): string | undefined {
+  const headerToken = CSRF_HEADER_NAMES.map((name) =>
+    headerValue(req, name),
+  ).find((value): value is string => !!value);
+  const body = req.body as { _csrf?: unknown } | undefined;
+  const bodyToken =
+    typeof body?._csrf === 'string' && body._csrf.length > 0
+      ? body._csrf
+      : undefined;
+
+  if (headerToken && bodyToken && headerToken !== bodyToken) {
+    return undefined;
+  }
+  return headerToken || bodyToken;
+}
+
+function tokensMatch(
+  submitted: string,
+  cookieToken: string,
+  secret: string,
+): boolean {
+  if (!safeEqual(submitted, cookieToken)) {
+    return false;
+  }
+  return isCsrfTokenValid(submitted, secret);
+}
+
+function isCsrfTokenValid(token: string, secret: string): boolean {
+  const parts = token.split(':');
+  if (parts.length !== 3) {
+    return false;
   }
 
-  /**
-   * Validate CSRF token using double-submit cookie pattern
-   */
-  private validateToken(headerToken: string, cookieToken: string): boolean {
-    // Tokens must match exactly (double-submit pattern)
-    if (headerToken !== cookieToken) {
-      return false;
-    }
-
-    // Verify HMAC signature
-    const parts: string[] = headerToken.split(':');
-    if (parts.length !== 3) {
-      return false;
-    }
-
-    const [randomBytes, timestamp, hmac] = parts as [string, string, string];
-    const data = `${randomBytes}:${timestamp}`;
-    const expectedHmac = crypto
-      .createHmac('sha256', this.secret)
-      .update(data)
-      .digest('hex');
-
-    if (hmac !== expectedHmac) {
-      return false;
-    }
-
-    // Check token age (max 24 hours)
-    const tokenAge = Date.now() - parseInt(timestamp, 10);
-    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
-
-    if (tokenAge > maxAge) {
-      return false;
-    }
-
-    return true;
+  const [randomBytes, timestamp, hmac] = parts;
+  if (!/^[a-f0-9]{64}$/.test(randomBytes) || !/^[a-f0-9]{64}$/.test(hmac)) {
+    return false;
   }
+
+  const issuedAt = Number(timestamp);
+  if (!Number.isInteger(issuedAt)) {
+    return false;
+  }
+
+  const age = Date.now() - issuedAt;
+  if (age > CSRF_MAX_AGE_MS || age < -CSRF_CLOCK_SKEW_MS) {
+    return false;
+  }
+
+  const expectedHmac = crypto
+    .createHmac('sha256', secret)
+    .update(`${randomBytes}:${timestamp}`)
+    .digest('hex');
+  return safeEqual(hmac, expectedHmac);
+}
+
+function readCookie(req: RequestWithCookies, name: string): string | undefined {
+  const fromParser = req.cookies?.[name];
+  if (typeof fromParser === 'string' && fromParser.length > 0) {
+    return fromParser;
+  }
+
+  const header = req.headers.cookie;
+  if (typeof header !== 'string' || header.length === 0) {
+    return undefined;
+  }
+
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator === -1) {
+      continue;
+    }
+    const key = part.slice(0, separator).trim();
+    if (key !== name) {
+      continue;
+    }
+    const raw = part.slice(separator + 1).trim();
+    if (!raw) {
+      return undefined;
+    }
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function headerValue(req: Request, name: string): string | undefined {
+  const raw = req.headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function safeEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }

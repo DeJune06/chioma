@@ -14,6 +14,9 @@ import { SecurityEvent } from './entities/security-event.entity';
 import { ThreatEvent } from './entities/threat-event.entity';
 import { Role } from './entities/role.entity';
 import { Permission } from './entities/permission.entity';
+import { AdminPermissionDelegation } from './entities/admin-permission-delegation.entity';
+import { PermissionDelegationService } from './permission-delegation.service';
+import { User } from '../users/entities/user.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { DatabaseEncryptionKeyService } from './database-encryption-key.service';
 import { AuditModule } from '../audit/audit.module';
@@ -27,6 +30,8 @@ import { AuditModule } from '../audit/audit.module';
       ThreatEvent,
       Role,
       Permission,
+      AdminPermissionDelegation,
+      User,
       AuditLog,
     ]),
   ],
@@ -37,6 +42,7 @@ import { AuditModule } from '../audit/audit.module';
     SecurityIncidentService,
     ComplianceService,
     RbacService,
+    PermissionDelegationService,
     EncryptionService,
     BlockchainAuditService,
     DatabaseEncryptionKeyService,
@@ -48,6 +54,7 @@ import { AuditModule } from '../audit/audit.module';
     SecurityIncidentService,
     ComplianceService,
     RbacService,
+    PermissionDelegationService,
     EncryptionService,
     BlockchainAuditService,
     DatabaseEncryptionKeyService,

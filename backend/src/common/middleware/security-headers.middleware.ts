@@ -14,16 +14,27 @@ const DOCS_PATH_PREFIX = '/api/docs';
 export class SecurityHeadersMiddleware implements NestMiddleware {
   private readonly strictMiddleware: ReturnType<typeof helmet>;
   private readonly docsMiddleware: ReturnType<typeof helmet>;
+  private readonly isProduction: boolean;
+  private readonly hstsMaxAge: number;
+  private readonly cspEnabled: boolean;
 
   constructor(private configService: ConfigService) {
-    const isProduction =
+    this.isProduction =
       this.configService.get<string>('NODE_ENV') === 'production';
-    const hstsMaxAge = parseInt(
+    const parsedMaxAge = parseInt(
       this.configService.get<string>('SECURITY_HSTS_MAX_AGE') || '31536000',
+      10,
     );
+    this.hstsMaxAge =
+      Number.isFinite(parsedMaxAge) && parsedMaxAge > 0
+        ? parsedMaxAge
+        : 31536000;
     // CSP is on by default; set SECURITY_CSP_ENABLED=false to opt out.
-    const cspEnabled =
+    this.cspEnabled =
       this.configService.get<string>('SECURITY_CSP_ENABLED') !== 'false';
+    const isProduction = this.isProduction;
+    const hstsMaxAge = this.hstsMaxAge;
+    const cspEnabled = this.cspEnabled;
 
     const baseOptions: Parameters<typeof helmet>[0] = {
       hsts: {
@@ -104,6 +115,44 @@ export class SecurityHeadersMiddleware implements NestMiddleware {
     const middleware = req.path?.startsWith(DOCS_PATH_PREFIX)
       ? this.docsMiddleware
       : this.strictMiddleware;
-    middleware(req, res, next);
+    middleware(req, res, (err?: unknown) => {
+      if (err) {
+        next(err);
+        return;
+      }
+      this.setRequiredHeaders(res);
+      next();
+    });
+  }
+
+  /**
+   * Headers named by the auth security policy. Helmet sets the same values;
+   * this pass keeps them present if a future Helmet default drops one.
+   */
+  private setRequiredHeaders(res: Response): void {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const preload = this.isProduction ? '; preload' : '';
+    res.setHeader(
+      'Strict-Transport-Security',
+      `max-age=${this.hstsMaxAge}; includeSubDomains${preload}`,
+    );
+
+    if (!this.cspEnabled) {
+      return;
+    }
+
+    const existing =
+      typeof res.getHeader === 'function'
+        ? res.getHeader('Content-Security-Policy')
+        : undefined;
+    if (existing) {
+      return;
+    }
+
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+    );
   }
 }
