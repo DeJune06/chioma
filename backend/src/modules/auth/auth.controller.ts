@@ -48,6 +48,8 @@ import { AuditLog } from '../audit/decorators/audit-log.decorator';
 import { AuditAction, AuditLevel } from '../audit/entities/audit-log.entity';
 import { AuditLogInterceptor } from '../audit/interceptors/audit-log.interceptor';
 import { SkipEmailCheck } from './decorators/skip-email-check.decorator';
+import { Public } from './decorators/public.decorator';
+import { issueDoubleSubmitCsrfToken } from '../../common/middleware/csrf.middleware';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -61,6 +63,24 @@ export class AuthController {
     private readonly configService: ConfigService,
     private readonly jwtService: JwtService,
   ) {}
+
+  @Get('csrf-token')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Issue a double-submit CSRF token',
+    description:
+      'Sets the XSRF-TOKEN cookie and returns the same token. Send it back on mutations as X-XSRF-TOKEN, X-CSRF-Token, or _csrf.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'CSRF token issued',
+  })
+  issueCsrfToken(@Res({ passthrough: true }) res: Response): {
+    csrfToken: string;
+  } {
+    return { csrfToken: issueDoubleSubmitCsrfToken(this.configService, res) };
+  }
 
   @Post('register')
   @AuditLog({

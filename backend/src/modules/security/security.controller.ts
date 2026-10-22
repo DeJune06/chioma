@@ -34,7 +34,9 @@ import { BlockchainAuditService } from './blockchain-audit.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { UserRole } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { PermissionDelegationService } from './permission-delegation.service';
 import { AuditLog } from '../audit/decorators/audit-log.decorator';
 import { AuditAction, AuditLevel } from '../audit/entities/audit-log.entity';
 import { AuditLogInterceptor } from '../audit/interceptors/audit-log.interceptor';
@@ -43,6 +45,7 @@ import {
   QueryComplianceReportDto,
   ResolveIncidentDto,
   AnchorAuditLogsDto,
+  DelegatePermissionDto,
 } from './dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ApiPaginatedResponse } from '../../common/decorators/api-paginated-response.decorator';
@@ -60,6 +63,7 @@ export class SecurityController {
     private readonly incidentService: SecurityIncidentService,
     private readonly complianceService: ComplianceService,
     private readonly rbacService: RbacService,
+    private readonly permissionDelegationService: PermissionDelegationService,
     private readonly blockchainAuditService: BlockchainAuditService,
   ) {}
 
@@ -348,6 +352,30 @@ export class SecurityController {
   })
   async seedRbac() {
     await this.rbacService.seedDefaultRoles();
+  }
+
+  @Post('security/rbac/delegations')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delegate a permission to another admin',
+    description:
+      'An admin may grant a permission they already hold to another admin. The grant is idempotent.',
+  })
+  @ApiResponse({ status: 200, description: 'Permission delegated' })
+  @AuditLog({
+    action: AuditAction.PERMISSION_CHANGE,
+    entityType: 'PermissionDelegation',
+    level: AuditLevel.SECURITY,
+    includeNewValues: true,
+  })
+  async delegatePermission(
+    @CurrentUser() user: User,
+    @Body() dto: DelegatePermissionDto,
+  ) {
+    return this.permissionDelegationService.delegate(user, dto);
   }
 
   // ─── Blockchain Audit Anchoring ───────────────────────────────────────────

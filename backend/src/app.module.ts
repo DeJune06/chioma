@@ -78,6 +78,7 @@ import { FavoritesModule } from './modules/favorites/favorites.module';
 import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
 import { CertificatePinningModule } from './common/security/certificate-pinning.module';
 import { OpenApiDocumentRegistryModule } from './common/validation/openapi-document-registry.module';
+import { RbacModule } from './common/rbac/rbac.module';
 
 const appLogger = new Logger('AppModule');
 
@@ -96,6 +97,7 @@ const appLogger = new Logger('AppModule');
     LockModule,
     IdempotencyModule,
     ResilienceModule,
+    RbacModule,
     CertificatePinningModule,
     OpenApiDocumentRegistryModule,
     require('./common/services/encryption.module').EncryptionModule,
